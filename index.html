@@ -280,19 +280,55 @@ const ERR = {
 };
 const errText = e => ERR[e && e.code] || 'Couldn’t organize that. Your words are saved; try Organize again.';
 
-/* without Claude: keep their words, split into rough items so nothing is lost */
-const roughItems = s => String(s).split(/(?<=[.!?])\s+|\n+|,?\s+\band then\b\s+/i).map(x => x.trim().replace(/^[-•\s]+/, '')).filter(Boolean);
+/* tidy on the phone: drop filler, capitalize, end sentences, split lists, keep their words */
+const FILLER = /\b(?:um+|uh+|erm+|hmm+|uh-huh|you know|i mean|kind of like|sort of like)\b,?\s*/gi;
+const NEG = /\b(?:didn'?t|did not|not|never|couldn'?t|wasn'?t|no)\b/;
+const cap = x => x.charAt(0).toUpperCase() + x.slice(1);
+function tidy(s) {
+  let t = String(s).replace(FILLER, '').replace(/\blike,\s*/gi, '').replace(/\s{2,}/g, ' ').replace(/\s+([,.!?])/g, '$1').trim();
+  t = t.replace(/\bi\b/g, 'I').replace(/(^|[.!?]\s+)([a-z])/g, (_, a, b) => a + b.toUpperCase());
+  return t && !/[.!?]$/.test(t) ? t + '.' : t;
+}
+// lists: split on sentences, "and then", "also", semicolons, and a new "and I …" clause; for task lists, on commas and "and" too
+function roughItems(s, taskList) {
+  const splitter = taskList
+    ? /(?<=[.!?])\s+|\n+|;\s*|,\s*(?:and\s+)?|\s+(?:and then|then|also|and)\s+|\s+(?=(?:call|email|text|send|book|buy|pick|finish|clean|pay|schedule|meet|write|review|fix|order|prep|start|follow|update|reply|plan|submit|drop|wash|cook|read)\b)/i
+    : /(?<=[.!?])\s+|\n+|;\s*|,?\s+(?:and then|also)\s+|,?\s+and\s+(?=(?:i|i'm|i've|i'll|my)\b)/i;
+  return String(s).replace(FILLER, '').split(splitter)
+    .map(x => (x || '').trim().replace(/^(?:and|so|then|ok(?:ay)?|also)\b[\s,]*/i, '').replace(/^[-•\s]+/, '').replace(/[.!?,]+$/, '').replace(/\bi\b/g, 'I'))
+    .filter(x => x.replace(/[^a-z]/gi, '').length > 1).map(cap);
+}
+const STOP = new Set('the a an to of for and with my at on in up get got go do did call called some'.split(' '));
+const keywords = s => (String(s).toLowerCase().match(/[a-z0-9]+/g) || []).filter(w => w.length > 2 && !STOP.has(w));
 function fallback(step, said, ctx) {
-  const items = roughItems(said);
+  const items = roughItems(said, step === 'tasks' || step === 'tomorrow');
   switch (step) {
-    case 'checkin': return { feeling: said.trim() };
+    case 'checkin': return { feeling: tidy(said) };
     case 'affirmations': return { affirmations: items };
-    case 'intention': return { intention: said.trim() };
-    case 'tasks': { const all = [...ctx.top3, ...ctx.other, ...items]; return { top3: all.slice(0, 3), other: all.slice(3) }; }
-    case 'done': return { done: [] };
+    case 'intention': return { intention: tidy(said) };
+    case 'tasks': {
+      const seen = new Set(), all = [];
+      for (const x of [...ctx.top3, ...ctx.other, ...items]) { const k = x.toLowerCase(); if (!seen.has(k)) { seen.add(k); all.push(x); } }
+      const top = ctx.top3.slice(0, 3);
+      for (const x of all) { if (top.length >= 3) break; if (!top.includes(x)) top.push(x); }
+      return { top3: top, other: all.filter(x => !top.includes(x)) };
+    }
+    case 'done': {
+      // a task is done when most of its key words come up in a phrase that isn't negated
+      const parts = said.toLowerCase().split(/[.!?,;]|\band\b|\bbut\b|\bthen\b/);
+      return { done: ctx.morning.map((task, i) => {
+        const kw = keywords(task); if (!kw.length) return null;
+        return parts.some(p => kw.filter(w => p.includes(w.slice(0, Math.max(3, w.length - 2)))).length / kw.length >= 0.5 && !NEG.test(p)) ? i + 1 : null;
+      }).filter(Boolean) };
+    }
     case 'wins': return { wins: items };
-    case 'slipped': return { items: items.map(what => ({ what, why: '' })) };
-    case 'food': return { calories: 'unclear', protein: 'unclear', clean: 'unclear', note: said.trim() };
+    case 'slipped': return { items: items.map(x => { const m = x.match(/^(.*?)\s+(?:because|cause|since|'cause)\s+(.*)$/i); return m ? { what: cap(m[1]), why: cap(m[2]) } : { what: x, why: '' }; }) };
+    case 'food': {
+      const parts = said.toLowerCase().split(/[.!?;]|\bbut\b/);
+      const judge = (re, cleanStyle) => { const p = parts.find(x => re.test(x)); if (!p) return 'unclear'; const neg = NEG.test(p);
+        return cleanStyle ? (neg ? 'yes' : /\b(?:had|ate|drank|some|a few|couple)\b/.test(p) ? 'no' : 'unclear') : (neg || /\b(?:missed|short|under)\b/.test(p) ? 'no' : 'yes'); };
+      return { calories: judge(/calor|\bcals?\b|2[,.]?5\d{2}/), protein: judge(/protein|\b1[89]\d\b|\b200\b/), clean: judge(/sugar|alcohol|drink|beer|wine|candy|dessert|sweets/, true), note: tidy(said) };
+    }
     case 'tomorrow': return { tasks: items };
   }
 }
@@ -336,7 +372,7 @@ function stopListening() {
 const MORNING = [
   { key: 'checkin', title: 'How are you feeling?', sub: 'A quick check-in. Say whatever’s true right now.' },
   { key: 'affirmations', title: 'Affirmations', sub: 'Say your affirmations for today.' },
-  { key: 'tasks', title: 'What do you want to get done today?', sub: 'Add anything new, say what matters most, or tell me to drop something.' },
+  { key: 'tasks', title: 'What do you want to get done today?', sub: 'Say anything new to add. Tap ☆ to pick your Top 3, × to drop one.' },
   { key: 'intention', title: 'One intention for today', sub: 'How do you want to show up?' },
 ];
 const NIGHT = [
@@ -400,15 +436,10 @@ async function handleSpeech(said) {
   if (!said.trim()) { session.phase = 'idle'; return render(); }
   const s = rec_(); (s.raw = s.raw || {})[step] = [s.raw[step], said].filter(Boolean).join('\n');
   session.phase = 'working'; session.said = said; session.error = ''; render();
-  let out;
-  try { out = await organize(step, said, contextFor(step)); }
-  catch (e) {
-    session.error = errText(e);
-    const t = tasksOf(rec_());
-    out = fallback(step, said, { top3: t.top3.map(x => x.text), other: t.other.map(x => x.text) });
-    s.unorganized = { ...(s.unorganized || {}), [step]: true };
-  }
-  if (!session.error && s.unorganized) delete s.unorganized[step];
+  // tidied on the phone: free, private, works offline
+  const t = tasksOf(rec_()), m = (db.days[session.day] || {}).morning;
+  const out = fallback(step, said, { top3: t.top3.map(x => x.text), other: t.other.map(x => x.text), morning: allTasks(m).map(x => x.text) });
+  if (s.unorganized) delete s.unorganized[step];
   apply(step, out);
   session.phase = 'review'; render();
 }
@@ -452,7 +483,6 @@ function vHome() {
   const carried = (db.carry || []).length;
   return `
   <div><span class="eyebrow">${esc(fmtDay(day))}</span><h1>${suggest === 'morning' ? 'Good morning.' : 'Good evening.'}</h1></div>
-  ${apiKey() ? '' : '<div class="notice">Add your Claude key in <b>Settings</b> so your entries get organized. Until then, everything you say is saved as you said it.</div>'}
   <div class="sessions">
     <button class="session-btn ${suggest === 'morning' ? 'suggest' : ''}" data-start="morning"><span class="ico">${I.sun}</span><span><b>Morning</b><small>Check-in, affirmations, tasks, intention${carried ? ` · ${carried} task${carried > 1 ? 's' : ''} from last night` : ''}</small></span>${st('morning')}</button>
     <button class="session-btn ${suggest === 'night' ? 'suggest' : ''}" data-start="night"><span class="ico">${I.moon}</span><span><b>Night</b><small>What got done, wins, what slipped, food, tomorrow</small></span>${st('night')}</button>
@@ -580,12 +610,7 @@ function vHistory() {
 }
 
 function vSettings() {
-  const k = apiKey();
   return `<div><span class="eyebrow">Settings</span><h1>Settings</h1></div>
-    <div class="card"><h2>Claude key</h2>
-      <div class="field"><label for="apiKey">Anthropic API key</label><input id="apiKey" type="password" autocomplete="off" placeholder="sk-ant-…" value="${esc(k)}">
-        <small>Get one at console.anthropic.com → API Keys. It’s stored only on this phone and only sent to Anthropic. Each entry costs about a cent to organize.</small></div>
-      <div class="row"><button class="btn gold small" data-act="save-key">Save key</button>${k ? '<button class="btn ghost small" data-act="test-key">Test it</button>' : ''}</div></div>
     <div class="card"><h2>Your journal</h2>
       <p class="muted" style="margin:0">Everything is saved on this phone only. Download a backup now and then, so nothing’s lost if you change phones.</p>
       <div class="row"><button class="btn ghost small" data-act="backup">Download backup</button><button class="btn ghost small" data-act="restore">Restore backup</button></div>
