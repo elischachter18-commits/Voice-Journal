@@ -649,15 +649,32 @@ function parseAI(kind, text) {
   return out;
 }
 let aiWait = null; // { kind, day } while the shortcut runs
+// Apple's model refuses text with swearing in it, so soften it on the way out (your saved words stay as you said them)
+const SOFT = [[/\bf+u+c+k+i+n+g?\b|\bfuckin'?/gi, 'really'], [/\b(?:mother)?f+u+c+k+(?:e[dr]s?|s|up)?\b/gi, 'darn'], [/\bbull ?shit\b/gi, 'nonsense'], [/\bshit(?:ty|tiest)?\b/gi, 'stuff'],
+  [/\bdamn(?:ed|it)?\b/gi, 'darn'], [/\bgoddamn\b/gi, 'darn'], [/\bass(?:hole)?s?\b/gi, 'jerk'], [/\bbitch(?:es|ing|y)?\b/gi, 'jerk'], [/\bpiss(?:ed)?\b/gi, 'annoyed'], [/\bhell\b/gi, 'heck'], [/\bcrap(?:py)?\b/gi, 'stuff'], [/\bdick(?:s|head)?\b/gi, 'jerk']];
+const soften = s => SOFT.reduce((t, [re, w]) => t.replace(re, w), String(s));
+const openShortcut = text => { location.href = `shortcuts://run-shortcut?name=${encodeURIComponent(SHORTCUT)}&input=text&text=${encodeURIComponent(soften(text))}`; };
 function runShortcut(kind, day) {
   aiWait = { kind, day }; aiRefused = false;
-  location.href = `shortcuts://run-shortcut?name=${encodeURIComponent(SHORTCUT)}&input=text&text=${encodeURIComponent(aiPrompt(kind, day))}`;
+  openShortcut(aiPrompt(kind, day));
   setTimeout(render, 400);
 }
+// a made-up, harmless day: if this works but your real day doesn't, something in your own words tripped Apple's filter
+const SAMPLE_PROMPT = `${AI_RULES} This is my end-of-day review.
+
+RECAP:
+(2 sentences on how today went)
+WINS:
+- (my wins, short)
+
+TODAY
+Tasks: Call a client [done]; Go for a walk [not done]; Answer emails [done]
+Wins: Finished my emails early; Had a good call with a client`;
+let testState = null; // null | 'waiting' | { ok, text }
 function saveAI(kind, day, text) {
   const s = (db.days[day] || {})[kind]; if (!s) return false;
   // Apple's model sometimes declines with a one-liner; don't save that as the summary
-  if (String(text).length < 300 && /\b(?:can(?:'|’)?t|cannot|unable to)\s+(?:assist|help)|I(?:'|’)m sorry/i.test(text)) return 'refused';
+  if (String(text).length < 300 && /\b(?:can(?:'|’)?t|cannot|unable to)\s+(?:assist|help)|I(?:'|’)m sorry|learn more|apple\.com|Apple website/i.test(text)) return 'refused';
   const sections = parseAI(kind, text);
   if (!Object.values(sections).some(v => v.length)) return false;
   s.ai = { sections, at: new Date().toISOString() }; aiWait = null; save(); return true;
@@ -740,7 +757,13 @@ function vSettings() {
         <li>Add the action <b>Use Model</b>. Set it to <b>On-Device</b>, put <b>Shortcut Input</b> in its box, and turn <b>Follow Up</b> off.</li>
         <li>Add the action <b>Copy to Clipboard</b> (it copies the model’s Response).</li>
       </ol>
-      <p class="muted" style="margin:0">Then finish a morning or night and tap ✨ Summarize. Needs iPhone 15 Pro or newer with Apple Intelligence on.</p></div>`;
+      <p class="muted" style="margin:0">Then finish a morning or night and tap ✨ Summarize. Don’t run it with ▶ in Shortcuts, since it needs your journal sent from here. Needs iPhone 15 Pro or newer with Apple Intelligence on.</p>
+      <span class="label">Check it works</span>
+      <p class="muted" style="margin:0">Sends a made-up, harmless day to your shortcut, so you can tell whether the setup works.</p>
+      ${testState === 'waiting' ? '<div class="row"><button class="btn gold small" data-act="test-paste">Paste test result</button><button class="btn ghost small" data-act="test-run">Run again</button></div>'
+        : '<button class="btn ghost small" data-act="test-run" style="align-self:flex-start">Test with a sample day</button>'}
+      ${testState && testState !== 'waiting' ? `<div class="notice">${testState.ok ? '<b>It works.</b> If your real day still gets refused, something in what you said tripped Apple’s filter. Tell me and I’ll soften more words.' : testState.text ? '<b>Apple refused even the sample.</b> In the shortcut, try the other model choice (On-Device or Private Cloud Compute), and check Apple Intelligence is on in iPhone Settings.' : '<b>Nothing was copied.</b> Check the shortcut is named exactly “' + SHORTCUT + '” and ends with Copy to Clipboard.'}
+        ${testState.text ? `<br><br><span class="muted">What came back:</span> ${esc(testState.text.slice(0, 400))}` : ''}</div>` : ''}</div>`;
 }
 
 /* ============ events ============ */
@@ -778,6 +801,13 @@ document.addEventListener('click', async e => {
   if (act === 'cancel-type') { session.phase = 'idle'; return render(); }
   if (act === 'submit-type') return handleSpeech(($('#typeBox') || {}).value || '');
   if (act === 'ai-run') return runShortcut(session.kind, session.day);
+  if (act === 'test-run') { testState = 'waiting'; openShortcut(SAMPLE_PROMPT); return setTimeout(render, 400); }
+  if (act === 'test-paste') {
+    let text = ''; try { text = await navigator.clipboard.readText(); } catch {}
+    text = text.trim();
+    const refused = text.length < 300 && /\b(?:can(?:'|’)?t|cannot|unable to)\s+(?:assist|help)|I(?:'|’)m sorry|learn more|apple\.com|Apple website/i.test(text);
+    testState = { ok: !!text && !refused && /RECAP|WINS/i.test(text), text }; return render();
+  }
   if (act === 'ai-cancel') { aiWait = null; pasteBox = false; return render(); }
   if (act === 'ai-details') { showDetails = !showDetails; return render(); }
   if (act === 'ai-paste' || act === 'ai-paste-fresh') {
