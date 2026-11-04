@@ -575,8 +575,10 @@ function nightSummaryBody(n, m) {
    back in the app, "Paste summary" reads it in. */
 const SHORTCUT = 'Journal Summary';
 const AI_HEADS = { morning: ['PLAN', 'TOP 3', 'TASKS'], night: ['RECAP', 'WINS', 'SLIPPED', 'TOMORROW', 'PATTERNS'] };
-const AI_RULES = `Rules: use only what is written below; never invent anything. Speak to me as "you". Plain, short, warm but not cheesy. No advice, no praise, no questions. The notes come from voice dictation, so fix misheard words and drop filler. Answer in plain text using exactly the headings shown, each on its own line, with list items starting with "- ".`;
-const ynu = v => v === 'yes' ? 'yes' : v === 'no' ? 'no' : 'unclear';
+// worded plainly on purpose: Apple's on-device model refuses prompts with words like "alcohol", so food is sent as goal met / not met
+const AI_RULES = `Please write a short, friendly summary of my personal daily planner notes below. Use only what's in my notes. Talk to me as "you". The notes were dictated, so fix obvious typos. Use exactly the headings shown, each on its own line, and start list items with "- ".`;
+const ynu = v => v === 'yes' ? 'met' : v === 'no' ? 'missed' : 'not noted';
+const goals = f => `calorie goal ${ynu((f || {}).calories)}, protein goal ${ynu((f || {}).protein)}, clean eating goal ${ynu((f || {}).clean)}`;
 function dayLine(day) {
   const d = db.days[day] || {}, m = d.morning || {}, n = d.night || {}, t = tasksOf(m), list = allTasks(m);
   if (!m.completedAt && !n.completedAt) return '';
@@ -585,13 +587,12 @@ function dayLine(day) {
   const missed = list.filter(x => !x.done).map(x => x.text); if (n.completedAt && missed.length) bits.push(`not done: ${missed.join('; ')}`);
   if ((n.slipped || []).length) bits.push(`slipped: ${n.slipped.map(x => x.what + (x.why ? ` (${x.why})` : '')).join('; ')}`);
   if ((n.wins || []).length) bits.push(`wins: ${n.wins.join('; ')}`);
-  if (n.food) bits.push(`food: calories ${ynu(n.food.calories)}, protein ${ynu(n.food.protein)}, no sugar/alcohol ${ynu(n.food.clean)}`);
+  if (n.food) bits.push(`nutrition: ${goals(n.food)}`);
   return `${fmtDay(day, { weekday: 'short', month: 'short', day: 'numeric' })}: ${bits.join(' | ') || 'no details'}`;
 }
 function aiPrompt(kind, day) {
   const d = db.days[day] || {}, m = d.morning || {}, n = d.night || {}, t = tasksOf(m);
-  if (kind === 'morning') return `Summarize my morning journal into a short game plan for today.
-${AI_RULES}
+  if (kind === 'morning') return `${AI_RULES} This is my morning plan for today.
 
 PLAN:
 (2 or 3 sentences: how I'm feeling, what matters most today, and my intention)
@@ -608,8 +609,7 @@ Other tasks: ${t.other.map(x => x.text).join('; ') || '(none)'}
 Intention: ${m.intention || '(none)'}`;
   const list = allTasks(m), week = [];
   for (let i = 7; i >= 1; i--) { const l = dayLine(addDays(day, -i)); if (l) week.push(l); }
-  return `Summarize my night journal for today, then look for patterns across my past week.
-${AI_RULES}
+  return `${AI_RULES} This is my end-of-day review, plus a short log of my past week.
 
 RECAP:
 (2 to 4 sentences on how today went)
@@ -620,14 +620,14 @@ SLIPPED:
 TOMORROW:
 - (my tasks for tomorrow, rewritten short and clear)
 PATTERNS:
-- (1 to 3 patterns that show up across several days below, e.g. the same thing slipping or a food target often missed; write "- Not enough days yet" if there's nothing clear)
+- (1 to 3 patterns across the past week, like the same task often not getting done or a goal often missed; write "- Not enough days yet" if there's nothing clear)
 
 TODAY
 Tasks: ${list.map(x => `${x.text} [${x.done ? 'done' : 'not done'}]`).join('; ') || '(none)'}
 Morning intention: ${m.intention || '(none)'}
 Wins: ${(n.wins || []).join('; ') || '(none)'}
 Slipped: ${(n.slipped || []).map(x => x.what + (x.why ? ` — ${x.why}` : '')).join('; ') || '(none)'}
-Food: calories ${ynu((n.food || {}).calories)}, protein ${ynu((n.food || {}).protein)}, no sugar/alcohol ${ynu((n.food || {}).clean)}${n.food && n.food.note ? ` (${n.food.note})` : ''}
+Nutrition: ${goals(n.food)}
 Tomorrow: ${(n.tomorrow || []).join('; ') || '(none)'}
 
 PAST WEEK
@@ -650,12 +650,14 @@ function parseAI(kind, text) {
 }
 let aiWait = null; // { kind, day } while the shortcut runs
 function runShortcut(kind, day) {
-  aiWait = { kind, day };
+  aiWait = { kind, day }; aiRefused = false;
   location.href = `shortcuts://run-shortcut?name=${encodeURIComponent(SHORTCUT)}&input=text&text=${encodeURIComponent(aiPrompt(kind, day))}`;
   setTimeout(render, 400);
 }
 function saveAI(kind, day, text) {
   const s = (db.days[day] || {})[kind]; if (!s) return false;
+  // Apple's model sometimes declines with a one-liner; don't save that as the summary
+  if (String(text).length < 300 && /\b(?:can(?:'|’)?t|cannot|unable to)\s+(?:assist|help)|I(?:'|’)m sorry/i.test(text)) return 'refused';
   const sections = parseAI(kind, text);
   if (!Object.values(sections).some(v => v.length)) return false;
   s.ai = { sections, at: new Date().toISOString() }; aiWait = null; save(); return true;
@@ -671,7 +673,8 @@ function aiCard(kind, s, m) {
 }
 function aiControls(kind, s) {
   const waiting = aiWait && aiWait.kind === kind && aiWait.day === session.day;
-  if (waiting) return `<div class="notice">When the shortcut finishes, come back here and tap <b>Paste summary</b>.</div>
+  if (waiting) return `${aiRefused ? `<div class="notice">Apple’s AI said no to this one. That’s its own filter being overly careful, not something you did. Tap <b>Run the shortcut again</b>. If it keeps happening, open the shortcut and switch <b>Use Model</b> from <b>On-Device</b> to <b>Private Cloud Compute</b>, which is also free and private.</div>`
+      : '<div class="notice">When the shortcut finishes, come back here and tap <b>Paste summary</b>.</div>'}
     ${pasteBox ? `<textarea class="type" id="aiBox" placeholder="Press and hold here, then tap Paste."></textarea><div class="row"><button class="btn gold" data-act="ai-save">Save summary</button></div>`
       : '<div class="row"><button class="btn gold" data-act="ai-paste">Paste summary</button></div>'}
     <div class="row" style="justify-content:center"><button class="link" data-act="ai-run">Run the shortcut again</button><button class="link" data-act="ai-cancel">Cancel</button></div>`;
@@ -689,7 +692,7 @@ function vSummary() {
     ${!s.ai || showDetails ? `<div class="summary">${k === 'morning' ? morningSummaryBody(d.morning) : nightSummaryBody(d.night, d.morning)}</div>` : ''}
     <div class="row"><button class="btn ghost" data-act="edit">Go back through it</button><button class="btn ${s.ai ? 'gold' : 'ghost'}" data-go="home">Done</button></div>`;
 }
-let showDetails = false, pasteBox = false;
+let showDetails = false, pasteBox = false, aiRefused = false;
 
 /* history + stats */
 function stats() {
@@ -781,13 +784,17 @@ document.addEventListener('click', async e => {
     aiWait = { kind: session.kind, day: session.day };
     let text = '';
     try { text = await navigator.clipboard.readText(); } catch {}
-    if (text && saveAI(session.kind, session.day, text)) { pasteBox = false; toast('Summary saved'); return render(); }
+    const r = text ? saveAI(session.kind, session.day, text) : false;
+    if (r === 'refused') { aiRefused = true; pasteBox = false; return render(); }
+    if (r) { aiRefused = pasteBox = false; toast('Summary saved'); return render(); }
     pasteBox = true; render(); toast(text ? 'That didn’t look like a summary. Paste it below.' : 'Paste the summary below.');
     const t = $('#aiBox'); if (t) t.focus(); return;
   }
   if (act === 'ai-save') {
     const v = ($('#aiBox') || {}).value || '';
-    if (saveAI(session.kind, session.day, v)) { pasteBox = false; toast('Summary saved'); return render(); }
+    const r = saveAI(session.kind, session.day, v);
+    if (r === 'refused') { aiRefused = true; pasteBox = false; return render(); }
+    if (r) { aiRefused = pasteBox = false; toast('Summary saved'); return render(); }
     return toast('Nothing to save yet. Paste the summary first.');
   }
   if (act === 'next') return nextStep();
