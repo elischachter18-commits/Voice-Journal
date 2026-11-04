@@ -140,6 +140,8 @@ li.done .t{color:var(--muted);text-decoration:line-through}
 /* summary */
 .summary{border-radius:24px;padding:22px;background:var(--surface);border:1px solid var(--line);display:flex;flex-direction:column;gap:18px}
 .summary section{display:flex;flex-direction:column;gap:8px}
+.summary.ai{border:1.5px solid var(--gold);box-shadow:0 0 0 3px var(--gold-soft),0 10px 40px -12px var(--sunglow)}
+.summary.ai>.label:first-child{color:var(--gold)}
 
 /* history */
 .stats{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -487,7 +489,7 @@ function vHome() {
     <button class="session-btn ${suggest === 'morning' ? 'suggest' : ''}" data-start="morning"><span class="ico">${I.sun}</span><span><b>Morning</b><small>Check-in, affirmations, tasks, intention${carried ? ` · ${carried} task${carried > 1 ? 's' : ''} from last night` : ''}</small></span>${st('morning')}</button>
     <button class="session-btn ${suggest === 'night' ? 'suggest' : ''}" data-start="night"><span class="ico">${I.moon}</span><span><b>Night</b><small>What got done, wins, what slipped, food, tomorrow</small></span>${st('night')}</button>
   </div>
-  ${d.morning && d.morning.completedAt ? `<div class="card"><span class="label">Today</span>${morningSummaryBody(d.morning, true)}</div>` : ''}`;
+  ${d.morning && d.morning.completedAt ? `<div class="card"><span class="label">Today</span>${d.morning.ai && (d.morning.ai.sections.PLAN || []).length ? `<p class="quote">${esc(d.morning.ai.sections.PLAN.join(' '))}</p>` : ''}${morningSummaryBody(d.morning, true)}</div>` : ''}`;
 }
 
 function stepBar() { return `<div class="steps">${steps(session.kind).map((_, i) => `<i class="${i <= session.step ? 'on' : ''}"></i>`).join('')}</div>`; }
@@ -568,13 +570,126 @@ function nightSummaryBody(n, m) {
     ${n.food ? `<section><span class="label">Food</span>${foodChips(n.food)}${n.food.note ? `<p class="muted" style="margin:0">${esc(n.food.note)}</p>` : ''}</section>` : ''}
     ${(n.tomorrow || []).length ? `<section><span class="label">Tomorrow</span>${itemList(n.tomorrow)}</section>` : ''}`;
 }
+/* ============ AI summaries: Apple Intelligence on this iPhone, through a Shortcut (free, private, nothing leaves the phone) ============
+   The app opens the "Journal Summary" shortcut with a prompt; the shortcut runs Apple's on-device model and copies the answer;
+   back in the app, "Paste summary" reads it in. */
+const SHORTCUT = 'Journal Summary';
+const AI_HEADS = { morning: ['PLAN', 'TOP 3', 'TASKS'], night: ['RECAP', 'WINS', 'SLIPPED', 'TOMORROW', 'PATTERNS'] };
+const AI_RULES = `Rules: use only what is written below; never invent anything. Speak to me as "you". Plain, short, warm but not cheesy. No advice, no praise, no questions. The notes come from voice dictation, so fix misheard words and drop filler. Answer in plain text using exactly the headings shown, each on its own line, with list items starting with "- ".`;
+const ynu = v => v === 'yes' ? 'yes' : v === 'no' ? 'no' : 'unclear';
+function dayLine(day) {
+  const d = db.days[day] || {}, m = d.morning || {}, n = d.night || {}, t = tasksOf(m), list = allTasks(m);
+  if (!m.completedAt && !n.completedAt) return '';
+  const bits = [];
+  if (t.top3.length) bits.push(`Top 3 done ${t.top3.filter(x => x.done).length}/${t.top3.length}`);
+  const missed = list.filter(x => !x.done).map(x => x.text); if (n.completedAt && missed.length) bits.push(`not done: ${missed.join('; ')}`);
+  if ((n.slipped || []).length) bits.push(`slipped: ${n.slipped.map(x => x.what + (x.why ? ` (${x.why})` : '')).join('; ')}`);
+  if ((n.wins || []).length) bits.push(`wins: ${n.wins.join('; ')}`);
+  if (n.food) bits.push(`food: calories ${ynu(n.food.calories)}, protein ${ynu(n.food.protein)}, no sugar/alcohol ${ynu(n.food.clean)}`);
+  return `${fmtDay(day, { weekday: 'short', month: 'short', day: 'numeric' })}: ${bits.join(' | ') || 'no details'}`;
+}
+function aiPrompt(kind, day) {
+  const d = db.days[day] || {}, m = d.morning || {}, n = d.night || {}, t = tasksOf(m);
+  if (kind === 'morning') return `Summarize my morning journal into a short game plan for today.
+${AI_RULES}
+
+PLAN:
+(2 or 3 sentences: how I'm feeling, what matters most today, and my intention)
+TOP 3:
+- (my top 3 tasks, rewritten short and clear)
+TASKS:
+- (my other tasks, rewritten short and clear)
+
+MY MORNING NOTES
+Feeling: ${m.checkin || '(none)'}
+Affirmations: ${(m.affirmations || []).join('; ') || '(none)'}
+Top 3: ${t.top3.map(x => x.text).join('; ') || '(none)'}
+Other tasks: ${t.other.map(x => x.text).join('; ') || '(none)'}
+Intention: ${m.intention || '(none)'}`;
+  const list = allTasks(m), week = [];
+  for (let i = 7; i >= 1; i--) { const l = dayLine(addDays(day, -i)); if (l) week.push(l); }
+  return `Summarize my night journal for today, then look for patterns across my past week.
+${AI_RULES}
+
+RECAP:
+(2 to 4 sentences on how today went)
+WINS:
+- (my wins, rewritten short and clear)
+SLIPPED:
+- (what slipped — why, short)
+TOMORROW:
+- (my tasks for tomorrow, rewritten short and clear)
+PATTERNS:
+- (1 to 3 patterns that show up across several days below, e.g. the same thing slipping or a food target often missed; write "- Not enough days yet" if there's nothing clear)
+
+TODAY
+Tasks: ${list.map(x => `${x.text} [${x.done ? 'done' : 'not done'}]`).join('; ') || '(none)'}
+Morning intention: ${m.intention || '(none)'}
+Wins: ${(n.wins || []).join('; ') || '(none)'}
+Slipped: ${(n.slipped || []).map(x => x.what + (x.why ? ` — ${x.why}` : '')).join('; ') || '(none)'}
+Food: calories ${ynu((n.food || {}).calories)}, protein ${ynu((n.food || {}).protein)}, no sugar/alcohol ${ynu((n.food || {}).clean)}${n.food && n.food.note ? ` (${n.food.note})` : ''}
+Tomorrow: ${(n.tomorrow || []).join('; ') || '(none)'}
+
+PAST WEEK
+${week.join('\n') || '(no other days yet)'}`;
+}
+// read the model's answer back into sections; anything without headings becomes the recap
+function parseAI(kind, text) {
+  const heads = AI_HEADS[kind], out = {}; let cur = null;
+  const headRe = new RegExp(`^[#*\\s]*(${heads.join('|').replace(/ /g, '\\s*')})[*\\s]*:?[*\\s]*(.*)$`, 'i');
+  for (const raw of String(text).replace(/\r/g, '').split('\n')) {
+    const line = raw.trim(); if (!line) continue;
+    const h = line.match(headRe);
+    if (h) { cur = h[1].toUpperCase().replace(/\s+/g, ' '); out[cur] = out[cur] || []; if (h[2].trim()) out[cur].push(h[2].trim()); continue; }
+    if (!cur) { cur = heads[0]; out[cur] = []; }
+    out[cur].push(line);
+  }
+  const clean = s => s.replace(/^\s*(?:[-•*–]|\d+[.)])\s*/, '').replace(/\*\*/g, '').trim();
+  for (const k in out) out[k] = out[k].map(clean).filter(x => x && !/^\(.*\)$/.test(x));
+  return out;
+}
+let aiWait = null; // { kind, day } while the shortcut runs
+function runShortcut(kind, day) {
+  aiWait = { kind, day };
+  location.href = `shortcuts://run-shortcut?name=${encodeURIComponent(SHORTCUT)}&input=text&text=${encodeURIComponent(aiPrompt(kind, day))}`;
+  setTimeout(render, 400);
+}
+function saveAI(kind, day, text) {
+  const s = (db.days[day] || {})[kind]; if (!s) return false;
+  const sections = parseAI(kind, text);
+  if (!Object.values(sections).some(v => v.length)) return false;
+  s.ai = { sections, at: new Date().toISOString() }; aiWait = null; save(); return true;
+}
+function aiCard(kind, s, m) {
+  if (!s || !s.ai) return '';
+  const x = s.ai.sections, para = k => (x[k] || []).length ? `<p class="quote">${esc(x[k].join(' '))}</p>` : '';
+  const sec = (k, label) => (x[k] || []).length ? `<section><span class="label">${label}</span>${itemList(x[k])}</section>` : '';
+  if (kind === 'morning') return `<div class="summary ai"><span class="label">✨ Game plan</span>${para('PLAN')}${sec('TOP 3', 'Top 3')}${sec('TASKS', 'Everything else')}</div>`;
+  const list = allTasks(m), top = tasksOf(m).top3;
+  const got = list.length ? `<span class="pill done" style="align-self:flex-start">Got done ${list.filter(t => t.done).length} of ${list.length}${top.length ? ` · Top 3: ${top.filter(t => t.done).length}/${top.length}` : ''}</span>` : '';
+  return `<div class="summary ai"><span class="label">✨ Your day</span>${got}${para('RECAP')}${sec('WINS', 'Wins')}${sec('SLIPPED', 'Slipped')}${sec('TOMORROW', 'Tomorrow')}${sec('PATTERNS', 'Patterns this week')}</div>`;
+}
+function aiControls(kind, s) {
+  const waiting = aiWait && aiWait.kind === kind && aiWait.day === session.day;
+  if (waiting) return `<div class="notice">When the shortcut finishes, come back here and tap <b>Paste summary</b>.</div>
+    ${pasteBox ? `<textarea class="type" id="aiBox" placeholder="Press and hold here, then tap Paste."></textarea><div class="row"><button class="btn gold" data-act="ai-save">Save summary</button></div>`
+      : '<div class="row"><button class="btn gold" data-act="ai-paste">Paste summary</button></div>'}
+    <div class="row" style="justify-content:center"><button class="link" data-act="ai-run">Run the shortcut again</button><button class="link" data-act="ai-cancel">Cancel</button></div>`;
+  if (s.ai) return `<div class="row" style="justify-content:center"><button class="link" data-act="ai-run">Redo the summary</button></div>`;
+  // the paste link stays here too, in case iPhone reopened the app fresh after the shortcut ran
+  return `<div class="row"><button class="btn gold" data-act="ai-run">✨ Summarize</button></div>
+    <div class="row" style="justify-content:center"><button class="link" data-act="ai-paste-fresh">Already ran it? Paste summary</button></div>`;
+}
 function vSummary() {
-  const d = db.days[session.day], k = session.kind;
+  const d = db.days[session.day], k = session.kind, s = d[k];
   return `<div class="prompt-top"><span class="eyebrow">${esc(fmtDay(session.day))}</span><button class="link" data-go="home">Close</button></div>
     <h1>${k === 'morning' ? 'Your day' : 'Your day, closed out'}</h1>
-    <div class="summary">${k === 'morning' ? morningSummaryBody(d.morning) : nightSummaryBody(d.night, d.morning)}</div>
-    <div class="row"><button class="btn ghost" data-act="edit">Go back through it</button><button class="btn gold" data-go="home">Done</button></div>`;
+    ${aiCard(k, s, d.morning)}${aiControls(k, s)}
+    ${s.ai ? `<button class="link" data-act="ai-details" style="align-self:center">${showDetails ? 'Hide' : 'Show'} everything you said</button>` : ''}
+    ${!s.ai || showDetails ? `<div class="summary">${k === 'morning' ? morningSummaryBody(d.morning) : nightSummaryBody(d.night, d.morning)}</div>` : ''}
+    <div class="row"><button class="btn ghost" data-act="edit">Go back through it</button><button class="btn ${s.ai ? 'gold' : 'ghost'}" data-go="home">Done</button></div>`;
 }
+let showDetails = false, pasteBox = false;
 
 /* history + stats */
 function stats() {
@@ -605,7 +720,7 @@ function vHistory() {
     ${days.length ? days.map(k => { const d = db.days[k], m = d.morning || {}, n = d.night || {}, open = openDay === k;
       const top = tasksOf(m).top3;
       return `<div><button class="day" data-day="${k}" aria-expanded="${open}"><span><b>${esc(fmtDay(k, { weekday: 'short', month: 'short', day: 'numeric' }))}</b><br><span class="muted" style="font-size:15px">${top.length ? `Top 3: ${top.filter(x => x.done).length}/${top.length}` : 'No Top 3'}</span></span><span class="chips">${m.completedAt ? '<span class="pill done">AM</span>' : '<span class="pill">AM</span>'}${n.completedAt ? '<span class="pill done">PM</span>' : '<span class="pill">PM</span>'}</span></button>
-        ${open ? `<div class="day-body">${m.step || m.completedAt ? `<div class="summary"><span class="label">Morning</span>${morningSummaryBody(m)}</div>` : ''}${n.step || n.completedAt ? `<div class="summary"><span class="label">Night</span>${nightSummaryBody(n, m)}</div>` : ''}</div>` : ''}</div>`; }).join('')
+        ${open ? `<div class="day-body">${aiCard('morning', m, m)}${m.step || m.completedAt ? `<div class="summary"><span class="label">Morning</span>${morningSummaryBody(m)}</div>` : ''}${aiCard('night', n, m)}${n.step || n.completedAt ? `<div class="summary"><span class="label">Night</span>${nightSummaryBody(n, m)}</div>` : ''}</div>` : ''}</div>`; }).join('')
       : '<div class="card muted">Your days will show up here after your first session.</div>'}`;
 }
 
@@ -614,7 +729,15 @@ function vSettings() {
     <div class="card"><h2>Your journal</h2>
       <p class="muted" style="margin:0">Everything is saved on this phone only. Download a backup now and then, so nothing’s lost if you change phones.</p>
       <div class="row"><button class="btn ghost small" data-act="backup">Download backup</button><button class="btn ghost small" data-act="restore">Restore backup</button></div>
-      <button class="btn danger small" data-act="erase" style="align-self:flex-start">Erase everything</button></div>`;
+      <button class="btn danger small" data-act="erase" style="align-self:flex-start">Erase everything</button></div>
+    <div class="card"><h2>✨ Summaries</h2>
+      <p class="muted" style="margin:0">Summaries use Apple Intelligence on this iPhone, so they’re free and your words never leave the phone. It needs a shortcut named <b>${SHORTCUT}</b> (set it up once):</p>
+      <ol style="margin:0;padding-left:22px;display:flex;flex-direction:column;gap:6px;font-size:16px">
+        <li>Open the <b>Shortcuts</b> app and tap <b>+</b>. Name it <b>${SHORTCUT}</b>.</li>
+        <li>Add the action <b>Use Model</b>. Set it to <b>On-Device</b>, put <b>Shortcut Input</b> in its box, and turn <b>Follow Up</b> off.</li>
+        <li>Add the action <b>Copy to Clipboard</b> (it copies the model’s Response).</li>
+      </ol>
+      <p class="muted" style="margin:0">Then finish a morning or night and tap ✨ Summarize. Needs iPhone 15 Pro or newer with Apple Intelligence on.</p></div>`;
 }
 
 /* ============ events ============ */
@@ -651,6 +774,22 @@ document.addEventListener('click', async e => {
   if (act === 'type') { session.phase = 'typing'; render(); const t = $('#typeBox'); if (t) t.focus(); return; }
   if (act === 'cancel-type') { session.phase = 'idle'; return render(); }
   if (act === 'submit-type') return handleSpeech(($('#typeBox') || {}).value || '');
+  if (act === 'ai-run') return runShortcut(session.kind, session.day);
+  if (act === 'ai-cancel') { aiWait = null; pasteBox = false; return render(); }
+  if (act === 'ai-details') { showDetails = !showDetails; return render(); }
+  if (act === 'ai-paste' || act === 'ai-paste-fresh') {
+    aiWait = { kind: session.kind, day: session.day };
+    let text = '';
+    try { text = await navigator.clipboard.readText(); } catch {}
+    if (text && saveAI(session.kind, session.day, text)) { pasteBox = false; toast('Summary saved'); return render(); }
+    pasteBox = true; render(); toast(text ? 'That didn’t look like a summary. Paste it below.' : 'Paste the summary below.');
+    const t = $('#aiBox'); if (t) t.focus(); return;
+  }
+  if (act === 'ai-save') {
+    const v = ($('#aiBox') || {}).value || '';
+    if (saveAI(session.kind, session.day, v)) { pasteBox = false; toast('Summary saved'); return render(); }
+    return toast('Nothing to save yet. Paste the summary first.');
+  }
   if (act === 'next') return nextStep();
   if (act === 'redo') return redoStep();
   if (act === 'edit') { const st = rec_(); delete st.completedAt; session.step = 0; st.step = 0; session.phase = 'idle'; save(); return render(); }
